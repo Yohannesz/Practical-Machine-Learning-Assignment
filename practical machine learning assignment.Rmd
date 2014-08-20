@@ -1,0 +1,186 @@
+---
+title: "Practical Machine Learning/ Prediction Assignment"
+author: "Yohannes Zerfu"
+date: "August 19, 2014"
+output: html_document
+---
+
+### Background
+This human activity recognition research has traditionally focused on discriminating between different activities, i.e. to predict "which" activity was performed at a specific point in time (like with the Daily Living Activities dataset above). The approach we propose for the Weight Lifting Exercises dataset is to investigate "how (well)" an activity was performed by the wearer. The "how (well)" investigation has only received little attention so far, even though it potentially provides useful information for a large variety of applications,such as sports training.
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience. We made sure that all participants could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg).
+
+###  Download and load the data.
+The Data is obtained this source:  http://groupware.les.inf.puc-rio.br/har
+
+```{r Data}
+url1="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url2="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(url1, destfile = "pml-training.csv", method = "curl")
+download.file(url2, destfile = "pml-testing.csv", method = "curl")
+
+training.data = read.csv("pml-training.csv", na.strings=c("", "NA", "NULL"))
+
+testing.data = read.csv("pml-testing.csv", na.strings=c("", "NA", "NULL"))
+dim(training.data)
+dim(testing.data)
+```
+
+#### Pre-screening the data
+
+
+There are 160 variables in the data sets, we will try to reduce the number of predictors.
+
+1. Remove variables that we believe have too many NA values.
+```{r RemoveNA}
+training.noNA <- training.data[ , colSums(is.na(training.data)) == 0]
+dim(training.noNA)
+```
+2. Removiing variables that are not related to our dependant variable
+```{r RemoveNIV}
+remove = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+training.NIV <- training.noNA[, -which(names(training.noNA) %in% remove)]
+dim(training.NIV)
+```
+3. Remove highly correlated variables 90% (using for example findCorrelation()).Note that only numeric Variables can be use here.
+
+```{r RemoveHCorr}
+corrmatrix <- cor(na.omit(training.NIV[sapply(training.NIV, is.numeric)]))
+dim(corrmatrix)
+
+# there are 52 variables.
+
+library('caret')
+library('corrplot') 
+corrplot(corrmatrix, method = "circle", tl.cex=.5)
+
+# we will then remove variables with high correlation
+
+removecorr = findCorrelation(corrmatrix, cutoff = .90, verbose = FALSE)
+training.NHCorr = training.NIV[,-removecorr]
+dim(training.NHCorr)
+
+```
+This resulting data set with 46 variable will be the data that we are going to use for our analysis. The next step is to split (80 - 20 ) our data to training and testing for cross validation. 
+
+```{r Split}
+inTrain <- createDataPartition(y=training.NHCorr$classe, p=0.8, list=FALSE)
+training <- training.NHCorr[inTrain,]
+testing <- training.NHCorr[-inTrain,]
+dim(training);dim(testing)
+
+```
+The resulting data sets are 11776 samples and 46 variables for training, 7846 samples and 46 variables for testing.
+
+### Analysis
+#### Regression Tree
+We will start by fitting a regression tree using "tree" package.
+
+```{r tree}
+library(tree)
+set.seed(3000)
+training.tree=tree(classe~., data=training)
+summary(training.tree)
+
+plot(training.tree)
+text(training.tree, pretty=0, cex =.5)
+```
+
+
+The next plot is Rpart form Caret a bit slow but good plots
+
+```{r rpart-plot}
+library(caret)
+modFit <- train(classe ~ .,method="rpart",data=training)
+print(modFit$finalModel)
+
+library(rpart.plot)
+rpart.plot(modFit$finalModel, cex=0.6, type=2) # basic tree plot
+```
+
+All the plot from the 'tree', caret 'rpart' look similar 
+
+### Cross Validation
+
+We are going to check the performance of the tree on the testing data by cross validation.
+```{r predmatrix}
+set.seed(3000)
+predict.tree=predict(training.tree,testing,type="class")
+predmatrix = with(testing,table(predict.tree,classe))
+sum(diag(predmatrix))/sum(as.vector(predmatrix)) 
+```
+The 0.72 missclassification error rate is realy high. Let us use 'caret' package 
+```{r predMatrix}
+set.seed(3000)
+predict.tree=predict(modFit,testing)
+predmatrix = with(testing,table(predict.tree,classe))
+sum(diag(predmatrix))/sum(as.vector(predmatrix)) 
+```
+
+From the result obtained using  the 'caret' package, 0.49, the misclassification error is much lower from the 'tree' package.
+
+This tree was grown to full depth, and might be too variable. We now use Cross Validation to prune it.
+```{r cvtree}
+
+set.seed(3000)
+cv.training=cv.tree(training.tree,FUN=prune.misclass)
+#cv.training
+plot(cv.training)
+```
+
+It shows that when the size of the tree goes down, the deviance goes up. It means the 21 is a good size (i.e. number of terminal nodes) for this tree. We do not need to prune it.
+
+Suppose we prune it at size of nodes at 15.
+```{r prune}
+set.seed(3000)
+prune.training=prune.misclass(training.tree,best=15)
+
+#Now lets evaluate this pruned tree on the test data.
+
+tree.pred=predict(prune.training,testing,type="class")
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+```
+0.64 is a little less than 0.72, so pruning did not hurt us with repect to misclassification errors, and gave us a simpler tree. We use less predictors to get almost the same result. By pruning, we got a shallower tree, which is easier to interpret.
+Let us now use bootstrap method to improve the accuracy. This method also helps us to reduce variance and avoid overfitting. 
+
+#### Random Forests
+This is method for classification that operate by constructing a multitude of decision trees at training time and outputting the class that is the mode of the classes output by individual trees. We will use "randomForcast" r package
+
+```{r randonForcast}
+
+library(randomForest)
+set.seed(3000)
+#Lets fit a random forest and see how well it performs.
+
+rf.training=randomForest(classe~.,data=training,ntree=100, importance=TRUE)
+rf.training
+#plot(rf.training, log="y")
+varImpPlot(rf.training, cex=0.7)
+
+```
+
+we can see which variables have higher impact on the prediction.
+
+#### Out-of Sample Accuracy
+Our Random Forest model shows OOB estimate of error rate: 0.59% for the training data. Now we will predict it for out-of sample accuracy.
+
+Now lets evaluate this tree on the test data.
+```{r testdata}
+tree.pred=predict(rf.training,testing,type="class")
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+```
+
+0.99 means we got a very accurate estimate.
+
+The number of variables tried at each split: 6. It means every time we only randomly use 6 predictors to grow the tree. Since p = 43, we can have it from 1 to 43, but it seems 6 is enough to get the good result.
+
+#### Conclusion
+Now let us use our pridiction model to predict 20 diffrent test cases. From the result we can see that the model did produce 20 test cases
+```{r testCases}
+testCases <- predict(rf.training, testing.data)
+testCases
+```
